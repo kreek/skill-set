@@ -5,8 +5,14 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$ROOT_DIR/bin/skill-set"
 TEST_COUNT=0
 
-pass() { TEST_COUNT=$((TEST_COUNT + 1)); printf 'ok %s - %s\n' "$TEST_COUNT" "$1"; }
-fail() { printf 'not ok - %s\n%s\n' "$1" "$2" >&2; exit 1; }
+pass() {
+  TEST_COUNT=$((TEST_COUNT + 1))
+  printf 'ok %s - %s\n' "$TEST_COUNT" "$1"
+}
+fail() {
+  printf 'not ok - %s\n%s\n' "$1" "$2" >&2
+  exit 1
+}
 assert_eq() {
   name="$1" expected="$2" actual="$3"
   [ "$expected" = "$actual" ] || fail "$name" "expected: [$expected]\nactual:   [$actual]"
@@ -27,17 +33,18 @@ setup_case() {
   export SKILL_SETS="$TMP_ROOT/skill-set"
   export TARGET_DIR="$TMP_ROOT/target"
   export STATE_FILE="$TMP_ROOT/state"
+  unset LOCK_DIR
   export PATH="$TMP_ROOT/bin:$PATH"
   mkdir -p "$HOME" "$SKILL_SETS" "$TARGET_DIR" "$TMP_ROOT/bin"
 }
 make_skill() {
   set_name="$1" skill="$2"
   mkdir -p "$SKILL_SETS/$set_name/$skill"
-  printf '# %s\n' "$skill" > "$SKILL_SETS/$set_name/$skill/SKILL.md"
+  printf '# %s\n' "$skill" >"$SKILL_SETS/$set_name/$skill/SKILL.md"
 }
 run_cli() { "$BIN" "$@"; }
 run_alias() { "$TMP_ROOT/bin/sklset" "$@"; }
-run_cli_with_default_root() { SKILL_SETS= "$BIN" "$@"; }
+run_cli_with_default_root() { SKILL_SETS="" "$BIN" "$@"; }
 run_cli_fail() {
   set +e
   output="$($BIN "$@" 2>&1)"
@@ -58,8 +65,8 @@ pass "list filters reserved, hidden, and invalid sets without mutating targets"
 
 setup_case
 mkdir -p "$HOME/skill-set/default/pi-craft" "$HOME/skill-set/work/sre-playbook"
-printf '# pi-craft\n' > "$HOME/skill-set/default/pi-craft/SKILL.md"
-printf '# sre-playbook\n' > "$HOME/skill-set/work/sre-playbook/SKILL.md"
+printf '# pi-craft\n' >"$HOME/skill-set/default/pi-craft/SKILL.md"
+printf '# sre-playbook\n' >"$HOME/skill-set/work/sre-playbook/SKILL.md"
 assert_eq "unset SKILL_SETS defaults to home skill-set" "work" "$(run_cli_with_default_root list)"
 pass "default skill root is ~/skill-set"
 
@@ -68,6 +75,7 @@ ln -s "$BIN" "$TMP_ROOT/bin/sklset"
 make_skill default pi-craft
 make_skill work sre-playbook
 assert_eq "current is none before load" "(none)" "$(run_cli current)"
+assert_file_absent "$TARGET_DIR/.agents/skills/pi-craft" "current must not link default skills"
 assert_eq "load reports active set" "loaded: work" "$(run_cli work)"
 assert_eq "current reports loaded set" "work" "$(run_cli current)"
 for dir in .agents .claude .codex; do
@@ -79,7 +87,7 @@ pass "load projects default and active skills to agent targets"
 
 setup_case
 mkdir -p "$TMP_ROOT/external-abp/proof"
-printf '# proof\n' > "$TMP_ROOT/external-abp/proof/SKILL.md"
+printf '# proof\n' >"$TMP_ROOT/external-abp/proof/SKILL.md"
 mkdir -p "$SKILL_SETS/abp"
 ln -s "$TMP_ROOT/external-abp/proof" "$SKILL_SETS/abp/proof"
 assert_eq "load reports symlinked set" "loaded: abp" "$(run_cli load abp)"
@@ -129,11 +137,21 @@ assert_eq "unsafe name keeps state" "work" "$(run_cli current)"
 pass "failed load keeps prior state intact and rejects unsafe set names"
 
 setup_case
+make_skill default pi-craft
+mkdir -p "$SKILL_SETS/work/bad name"
+printf '# bad\n' >"$SKILL_SETS/work/bad name/SKILL.md"
+bad_skill_output="$(run_cli_fail load work)"
+assert_eq "unsafe skill name rejected" "skill-set: invalid skill name in work: bad name" "$bad_skill_output"
+assert_file_absent "$TARGET_DIR/.agents/skills/bad name" "unsafe skill name does not link"
+pass "skill directory names are validated before linking"
+
+setup_case
 make_skill default shared
 make_skill work shared
 conflict_output="$(run_cli_fail load work)"
 assert_eq "default and active duplicate skill conflicts" "skill-set: skill exists in both default and work: shared" "$conflict_output"
 assert_eq "duplicate conflict does not write state" "(none)" "$(run_cli current)"
+assert_file_absent "$TARGET_DIR/.agents/skills/shared" "duplicate conflict does not sync default"
 pass "default and active set duplicate skill names are rejected"
 
 setup_case
@@ -150,7 +168,7 @@ make_skill default pi-craft
 make_skill dev workflow
 make_skill ruby rspec
 run_cli load dev >/dev/null
-printf '../outside\n' > "$STATE_FILE"
+printf '../outside\n' >"$STATE_FILE"
 state_output="$(run_cli_fail load ruby)"
 assert_eq "invalid state entry rejected" "skill-set: invalid state entry: ../outside" "$state_output"
 assert_link_target "$TARGET_DIR/.agents/skills/workflow" "$SKILL_SETS/dev/workflow" "invalid state does not mutate existing links"
@@ -161,7 +179,7 @@ setup_case
 make_skill default pi-craft
 make_skill dev workflow
 make_skill ruby rspec
-printf 'missing\n' > "$STATE_FILE"
+printf 'missing\n' >"$STATE_FILE"
 missing_state_output="$(run_cli_fail current)"
 assert_eq "missing state set rejected" "skill-set: state references missing skill set: missing" "$missing_state_output"
 pass "state file entries must reference existing sets"
@@ -211,7 +229,7 @@ setup_case
 make_skill default pi-craft
 doctor_output="$(run_cli doctor)"
 case "$doctor_output" in
-  *"SKILL_SETS  : $SKILL_SETS  ok"*"default     : linked (1 skills)"*"$TARGET_DIR/.agents/skills"*"(1 skills)"*"$TARGET_DIR/.claude/skills"*"(1 skills)"*"$TARGET_DIR/.codex/skills"*"(1 skills)"*) ;;
+  *"SKILL_SETS  : $SKILL_SETS  ok"*"default     : present (1 skills)"*"$TARGET_DIR/.agents/skills"*"(0 skills)"*"$TARGET_DIR/.claude/skills"*"(0 skills)"*"$TARGET_DIR/.codex/skills"*"(0 skills)"*) ;;
   *) fail "doctor shows config and managed target paths" "$doctor_output" ;;
 esac
 pass "doctor shows config and managed target paths"
@@ -223,7 +241,24 @@ sync_two="$(run_cli sync)"
 assert_eq "sync output" "synced: default" "$sync_one"
 assert_eq "sync is idempotent" "synced: default" "$sync_two"
 assert_link_target "$TARGET_DIR/.agents/skills/pi-craft" "$SKILL_SETS/default/pi-craft" "sync links default"
+assert_file_absent "$STATE_FILE.lock" "sync removes operation lock"
 pass "sync links default idempotently"
+
+setup_case
+make_skill default pi-craft
+make_skill work sre-playbook
+mkdir "$STATE_FILE.lock"
+locked_output="$(run_cli_fail load work)"
+assert_eq "operation lock rejects concurrent mutation" "skill-set: another skill-set operation is running: $STATE_FILE.lock" "$locked_output"
+assert_file_absent "$TARGET_DIR/.agents/skills/pi-craft" "locked load does not sync default"
+assert_file_absent "$TARGET_DIR/.agents/skills/sre-playbook" "locked load does not link active skill"
+pass "mutating commands refuse concurrent operation locks"
+
+setup_case
+make_skill work sre-playbook
+assert_eq "sync reports absent default" "synced: no default set" "$(run_cli sync)"
+assert_file_absent "$TARGET_DIR/.agents/skills/sre-playbook" "sync without default must not link switchable skills"
+pass "sync reports when no default set exists"
 
 setup_case
 make_skill default pi-craft
@@ -287,6 +322,7 @@ make_skill ruby proof
 conflict_output="$(run_cli_fail load dev ruby)"
 assert_eq "cross-set conflict surfaces both names" "skill-set: skill exists in both dev and ruby: proof" "$conflict_output"
 assert_eq "cross-set conflict leaves state empty" "(none)" "$(run_cli current)"
+assert_file_absent "$TARGET_DIR/.agents/skills/pi-craft" "cross-set conflict does not sync default"
 assert_file_absent "$TARGET_DIR/.agents/skills/proof" "cross-set conflict does not link"
 pass "cross-set conflicts are caught before any linking"
 
@@ -407,6 +443,8 @@ make_skill default pi-craft
 make_skill dev workflow
 make_skill ruby rspec
 run_cli load dev >/dev/null
+mkdir -p "$TMP_ROOT/locks"
+export LOCK_DIR="$TMP_ROOT/locks/add.lock"
 chmod a-w "$(dirname "$STATE_FILE")"
 add_state_failure="$(run_cli_fail add ruby)"
 assert_eq "add state write failure reports error" "skill-set: cannot create temporary state file" "$add_state_failure"
@@ -418,6 +456,8 @@ setup_case
 make_skill default pi-craft
 make_skill dev workflow
 run_cli load dev >/dev/null
+mkdir -p "$TMP_ROOT/locks"
+export LOCK_DIR="$TMP_ROOT/locks/remove.lock"
 chmod a-w "$(dirname "$STATE_FILE")"
 remove_state_failure="$(run_cli_fail remove dev)"
 assert_eq "remove state write failure reports error" "skill-set: cannot remove state file: $STATE_FILE" "$remove_state_failure"
@@ -429,6 +469,8 @@ make_skill default pi-craft
 make_skill dev workflow
 make_skill ruby rspec
 run_cli load dev ruby >/dev/null
+mkdir -p "$TMP_ROOT/locks"
+export LOCK_DIR="$TMP_ROOT/locks/unload.lock"
 chmod a-w "$(dirname "$STATE_FILE")"
 unload_state_failure="$(run_cli_fail unload)"
 assert_eq "unload state write failure reports error" "skill-set: cannot remove state file: $STATE_FILE" "$unload_state_failure"

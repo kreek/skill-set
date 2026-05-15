@@ -46,8 +46,9 @@ Each skill is a directory with a `SKILL.md` file. Skill directories may also be
 symlinks to skill directories stored elsewhere.
 
 Hidden directories, invalid set names, and `default` are excluded from
-`skill-set list`. Set names may contain letters, numbers, dots, underscores, and
-hyphens. They may not contain slashes or start with a dot.
+`skill-set list`. Set and skill directory names may contain letters, numbers,
+dots, underscores, and hyphens. They may not contain slashes or start with a
+dot.
 
 By default, skills are linked into:
 
@@ -171,6 +172,8 @@ autoload -Uz compinit && compinit
 ```
 
 ## Development
+
+Install `shellcheck` and `shfmt`, and make sure `zsh` is available. Then run:
 
 ```sh
 make check

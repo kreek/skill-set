@@ -8,6 +8,8 @@ SKILL_SETS="${SKILL_SETS:-$HOME/skill-set}"
 STATE_FILE="${STATE_FILE:-$HOME/.skill-set}"
 TARGET_DIR="${TARGET_DIR:-$HOME}"
 DEFAULT_SET="default"
+LOCK_DIR="${LOCK_DIR:-$STATE_FILE.lock}"
+LOCK_ACTIVE=0
 TRANSACTION_ACTIVE=0
 CREATED_LINKS=()
 REMOVED_TARGETS=()
@@ -18,6 +20,51 @@ STATE_WAS_PRESENT=0
 error() {
   echo "$PROGRAM: $*" >&2
   exit 1
+}
+
+clear_operation_traps() {
+  trap - EXIT INT TERM
+}
+
+release_lock() {
+  if [ "$LOCK_ACTIVE" -eq 1 ]; then
+    rmdir "$LOCK_DIR" 2>/dev/null || true
+    LOCK_ACTIVE=0
+  fi
+}
+
+abort_operation() {
+  local status="$?"
+  clear_operation_traps
+  if [ "$TRANSACTION_ACTIVE" -eq 1 ]; then
+    rollback_mutation
+    end_transaction
+  fi
+  release_lock
+  exit "$status"
+}
+
+set_operation_traps() {
+  trap abort_operation EXIT
+  trap abort_operation INT TERM
+}
+
+acquire_lock() {
+  [ "$LOCK_ACTIVE" -eq 0 ] || return 0
+  mkdir -p "$(dirname "$STATE_FILE")" || error "cannot create state directory"
+  if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    if [ -d "$LOCK_DIR" ]; then
+      error "another skill-set operation is running: $LOCK_DIR"
+    fi
+    error "cannot create operation lock: $LOCK_DIR"
+  fi
+  LOCK_ACTIVE=1
+  set_operation_traps
+}
+
+finish_operation() {
+  clear_operation_traps
+  release_lock
 }
 
 begin_transaction() {
@@ -32,6 +79,7 @@ begin_transaction() {
     cp "$STATE_FILE" "$STATE_BACKUP" || error "cannot back up state file: $STATE_FILE"
     STATE_WAS_PRESENT=1
   fi
+  set_operation_traps
 }
 
 end_transaction() {
@@ -116,7 +164,7 @@ valid_set_name() {
   name="$1"
   [ -n "$name" ] || return 1
   case "$name" in
-    .*|*/*|*[!A-Za-z0-9._-]*) return 1 ;;
+    .* | */* | *[!A-Za-z0-9._-]*) return 1 ;;
   esac
   return 0
 }
@@ -125,12 +173,31 @@ set_exists() {
   [ -d "$SKILL_SETS/$1" ]
 }
 
+valid_skill_name() {
+  valid_set_name "$1"
+}
+
+validate_set_skills() {
+  local set_name skill_dir skill_name
+  set_name="$1"
+  [ -d "$SKILL_SETS/$set_name" ] || return 0
+
+  for skill_dir in "$SKILL_SETS/$set_name"/* "$SKILL_SETS/$set_name"/.[!.]* "$SKILL_SETS/$set_name"/..?*; do
+    [ -e "$skill_dir" ] || [ -L "$skill_dir" ] || continue
+    [ -d "$skill_dir" ] || continue
+    [ -f "$skill_dir/SKILL.md" ] || continue
+    skill_name="$(basename "$skill_dir")"
+    valid_skill_name "$skill_name" || error "invalid skill name in $set_name: $skill_name"
+  done
+}
+
 require_switchable_set() {
   local name
   name="$1"
   valid_set_name "$name" || error "invalid skill set name: $name"
   [ "$name" != "$DEFAULT_SET" ] || error "reserved skill set name: $DEFAULT_SET"
   set_exists "$name" || error "no such skill set: $name (try: skill-set list)"
+  validate_set_skills "$name"
 }
 
 read_stack() {
@@ -139,7 +206,7 @@ read_stack() {
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     printf '%s\n' "$line"
-  done < "$STATE_FILE"
+  done <"$STATE_FILE"
 }
 
 validate_stack() {
@@ -150,7 +217,7 @@ validate_stack() {
     valid_set_name "$line" || error "invalid state entry: $line"
     [ "$line" != "$DEFAULT_SET" ] || error "reserved state entry: $DEFAULT_SET"
     set_exists "$line" || error "state references missing skill set: $line"
-  done < "$STATE_FILE"
+  done <"$STATE_FILE"
 }
 
 stack_contains() {
@@ -173,7 +240,7 @@ write_stack() {
   [ ! -d "$STATE_FILE" ] || transaction_error "cannot write state file: $STATE_FILE"
   tmp_file="$(mktemp "${STATE_FILE}.XXXXXX" 2>/dev/null)" || transaction_error "cannot create temporary state file"
   for name in "$@"; do
-    printf '%s\n' "$name" >> "$tmp_file" || {
+    printf '%s\n' "$name" >>"$tmp_file" || {
       rm -f "$tmp_file"
       transaction_error "cannot write state file: $STATE_FILE"
     }
@@ -197,14 +264,26 @@ target_dirs() {
 }
 
 skill_paths() {
-  local set_name skill_dir
+  local set_name skill_dir skill_name
+  local -a skill_names
   set_name="$1"
   [ -d "$SKILL_SETS/$set_name" ] || return 0
-  find "$SKILL_SETS/$set_name" -mindepth 1 -maxdepth 1 \( -type d -o -type l \) | while IFS= read -r skill_dir; do
+
+  skill_names=()
+  for skill_dir in "$SKILL_SETS/$set_name"/* "$SKILL_SETS/$set_name"/.[!.]* "$SKILL_SETS/$set_name"/..?*; do
+    [ -e "$skill_dir" ] || [ -L "$skill_dir" ] || continue
     [ -d "$skill_dir" ] || continue
     [ -f "$skill_dir/SKILL.md" ] || continue
-    echo "$skill_dir"
-  done | sort
+    skill_name="$(basename "$skill_dir")"
+    valid_skill_name "$skill_name" || error "invalid skill name in $set_name: $skill_name"
+    skill_names+=("$skill_name")
+  done
+
+  if [ "${#skill_names[@]}" -gt 0 ]; then
+    printf '%s\n' "${skill_names[@]}" | sort -u | while IFS= read -r skill_name; do
+      printf '%s/%s\n' "$SKILL_SETS/$set_name" "$skill_name"
+    done
+  fi
 }
 
 count_skills_in_set() {
@@ -214,6 +293,7 @@ count_skills_in_set() {
 sync_default() {
   ensure_root
   if [ -d "$SKILL_SETS/$DEFAULT_SET" ]; then
+    validate_set_skills "$DEFAULT_SET"
     preflight_link_set "$DEFAULT_SET"
     begin_transaction
     link_set "$DEFAULT_SET"
@@ -234,7 +314,7 @@ cmd_list() {
 
 cmd_current() {
   local stack
-  sync_default
+  ensure_root
   validate_stack
   stack="$(read_stack)"
   if [ -n "$stack" ]; then
@@ -245,8 +325,16 @@ cmd_current() {
 }
 
 cmd_sync() {
-  sync_default
-  echo "synced: default"
+  ensure_root
+  acquire_lock
+  if [ -d "$SKILL_SETS/$DEFAULT_SET" ]; then
+    sync_default
+    finish_operation
+    echo "synced: default"
+  else
+    finish_operation
+    echo "synced: no default set"
+  fi
 }
 
 # Pairwise conflict check across default + every named set.
@@ -419,7 +507,10 @@ cmd_load() {
   for name in "$@"; do
     require_switchable_set "$name"
   done
-  sync_default
+  acquire_lock
+  if [ -d "$SKILL_SETS/$DEFAULT_SET" ]; then
+    validate_set_skills "$DEFAULT_SET"
+  fi
   check_stack_conflicts "$@"
 
   local -a current_list
@@ -428,16 +519,21 @@ cmd_load() {
   while IFS= read -r entry; do
     current_list+=("$entry")
   done < <(read_stack)
+  for entry in "${current_list[@]+"${current_list[@]}"}"; do
+    validate_set_skills "$entry"
+  done
   preflight_stack_links "${#current_list[@]}" "${current_list[@]+"${current_list[@]}"}" "$@"
 
   local current_joined
   current_joined="$(join_with_spaces "${current_list[@]+"${current_list[@]}"}")"
 
   if stacks_equal "$@"; then
+    finish_operation
     echo "already loaded: $*"
     return
   fi
 
+  sync_default
   begin_transaction
 
   local i
@@ -453,6 +549,7 @@ cmd_load() {
 
   write_stack "$@"
   end_transaction
+  finish_operation
 
   if [ -n "$current_joined" ]; then
     echo "loaded: $* (was: $current_joined)"
@@ -466,9 +563,10 @@ cmd_add() {
   [ "$#" -eq 1 ] || error "usage: skill-set add <name>"
   name="$1"
   require_switchable_set "$name"
-  sync_default
+  acquire_lock
 
   if stack_contains "$name"; then
+    finish_operation
     echo "already in stack: $name"
     return
   fi
@@ -479,14 +577,22 @@ cmd_add() {
   while IFS= read -r entry; do
     proposed+=("$entry")
   done < <(read_stack)
+  for entry in "${proposed[@]+"${proposed[@]}"}"; do
+    validate_set_skills "$entry"
+  done
   proposed+=("$name")
 
+  if [ -d "$SKILL_SETS/$DEFAULT_SET" ]; then
+    validate_set_skills "$DEFAULT_SET"
+  fi
   check_stack_conflicts "${proposed[@]}"
   preflight_link_set "$name"
+  sync_default
   begin_transaction
   link_set "$name"
   write_stack "${proposed[@]}"
   end_transaction
+  finish_operation
   echo "added: $name"
 }
 
@@ -496,7 +602,7 @@ cmd_remove() {
   name="$1"
   valid_set_name "$name" || error "invalid skill set name: $name"
   [ "$name" != "$DEFAULT_SET" ] || error "reserved skill set name: $DEFAULT_SET"
-  sync_default
+  acquire_lock
 
   if ! stack_contains "$name"; then
     error "not in stack: $name"
@@ -508,12 +614,16 @@ cmd_remove() {
   while IFS= read -r n; do
     current+=("$n")
   done < <(read_stack)
+  for n in "${current[@]+"${current[@]}"}"; do
+    validate_set_skills "$n"
+  done
   remaining=()
   for n in "${current[@]+"${current[@]}"}"; do
     [ "$n" = "$name" ] && continue
     remaining+=("$n")
   done
 
+  sync_default
   begin_transaction
   unlink_set "$name"
   if [ "${#remaining[@]}" -eq 0 ]; then
@@ -522,13 +632,14 @@ cmd_remove() {
     write_stack "${remaining[@]}"
   fi
   end_transaction
+  finish_operation
   echo "removed: $name"
 }
 
 cmd_unload() {
   local i entry
   [ "$#" -eq 0 ] || error "usage: skill-set unload"
-  sync_default
+  acquire_lock
 
   local -a current_list
   validate_stack
@@ -538,10 +649,16 @@ cmd_unload() {
   done < <(read_stack)
 
   if [ "${#current_list[@]}" -eq 0 ]; then
+    finish_operation
     echo "unloaded: (none)"
     return
   fi
 
+  for entry in "${current_list[@]+"${current_list[@]}"}"; do
+    validate_set_skills "$entry"
+  done
+
+  sync_default
   i=$((${#current_list[@]} - 1))
   begin_transaction
   while [ "$i" -ge 0 ]; do
@@ -550,6 +667,7 @@ cmd_unload() {
   done
   write_stack
   end_transaction
+  finish_operation
 
   echo "unloaded: $(join_with_spaces "${current_list[@]}")"
 }
@@ -567,7 +685,6 @@ print_target_status() {
 }
 
 cmd_doctor() {
-  sync_default
   local stack current_display root_status
   validate_stack
   stack="$(read_stack)"
@@ -586,7 +703,12 @@ cmd_doctor() {
   printf 'STATE_FILE  : %s\n' "$STATE_FILE"
   printf 'TARGET_DIR  : %s\n' "$TARGET_DIR"
   printf 'current     : %s\n' "$current_display"
-  printf 'default     : linked (%s skills)\n' "$(count_skills_in_set "$DEFAULT_SET")"
+  if [ -d "$SKILL_SETS/$DEFAULT_SET" ]; then
+    validate_set_skills "$DEFAULT_SET"
+    printf 'default     : present (%s skills)\n' "$(count_skills_in_set "$DEFAULT_SET")"
+  else
+    printf 'default     : missing (0 skills)\n'
+  fi
   echo
   print_target_status
 }
@@ -594,36 +716,44 @@ cmd_doctor() {
 main() {
   command_name="${1:---help}"
   case "$command_name" in
-    --help|-h|help)
+    --help | -h | help)
       usage
       ;;
     list)
-      shift; [ "$#" -eq 0 ] || error "usage: skill-set list"
+      shift
+      [ "$#" -eq 0 ] || error "usage: skill-set list"
       ensure_root
       cmd_list
       ;;
     current)
-      shift; [ "$#" -eq 0 ] || error "usage: skill-set current"
+      shift
+      [ "$#" -eq 0 ] || error "usage: skill-set current"
       cmd_current
       ;;
     sync)
-      shift; [ "$#" -eq 0 ] || error "usage: skill-set sync"
+      shift
+      [ "$#" -eq 0 ] || error "usage: skill-set sync"
       cmd_sync
       ;;
     load)
-      shift; cmd_load "$@"
+      shift
+      cmd_load "$@"
       ;;
     add)
-      shift; cmd_add "$@"
+      shift
+      cmd_add "$@"
       ;;
     remove)
-      shift; cmd_remove "$@"
+      shift
+      cmd_remove "$@"
       ;;
     unload)
-      shift; cmd_unload "$@"
+      shift
+      cmd_unload "$@"
       ;;
     doctor)
-      shift; [ "$#" -eq 0 ] || error "usage: skill-set doctor"
+      shift
+      [ "$#" -eq 0 ] || error "usage: skill-set doctor"
       cmd_doctor
       ;;
     *)

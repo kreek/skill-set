@@ -7,6 +7,9 @@ test:
 
 lint:
 	bash -n bin/skill-set tests/run.sh tests/skill_set_tests.sh completions/skill-set.bash
+	zsh -n completions/_skill-set
+	shellcheck bin/skill-set tests/run.sh tests/skill_set_tests.sh completions/skill-set.bash
+	shfmt -d -i 2 -ci bin/skill-set tests/run.sh tests/skill_set_tests.sh completions/skill-set.bash
 
 check: lint test
 
