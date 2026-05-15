@@ -1,0 +1,67 @@
+#compdef skill-set sklset
+
+_skill_set() {
+  local -a commands sets stack remaining
+  local sub s
+
+  commands=(
+    'load:Replace the active stack with the given sets'
+    'add:Push a set onto the active stack'
+    'remove:Remove a set from the active stack'
+    'unload:Clear the active stack'
+    'list:List available switchable sets'
+    'current:Print the active stack'
+    'sync:Ensure default is stowed'
+    'doctor:Show configuration and detected skill paths'
+    '--help:Show help'
+  )
+
+  sets=(${(f)"$(skill-set list 2>/dev/null)"})
+
+  if (( CURRENT == 2 )); then
+    _describe -t commands 'commands' commands
+    _describe -t sets 'skill sets' sets
+    return 0
+  fi
+
+  sub="${words[2]}"
+  case "$sub" in
+    load|add|remove|unload|list|current|sync|doctor|--help|-h|help) ;;
+    *) sub="load" ;;
+  esac
+
+  case "$sub" in
+    load)
+      remaining=()
+      for s in $sets; do
+        if (( ${words[(I)$s]} == 0 )); then
+          remaining+=($s)
+        fi
+      done
+      _describe -t sets 'skill sets' remaining
+      return 0
+      ;;
+    add)
+      stack=(${(f)"$(skill-set current 2>/dev/null)"})
+      remaining=()
+      for s in $sets; do
+        if [[ "${stack[(r)$s]}" != "$s" ]]; then
+          remaining+=($s)
+        fi
+      done
+      _describe -t sets 'skill sets' remaining
+      return 0
+      ;;
+    remove)
+      stack=(${(f)"$(skill-set current 2>/dev/null)"})
+      _describe -t sets 'active sets' stack
+      return 0
+      ;;
+    *)
+      _message 'no more arguments'
+      return 0
+      ;;
+  esac
+}
+
+_skill_set "$@"

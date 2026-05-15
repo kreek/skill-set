@@ -1,0 +1,635 @@
+#!/usr/bin/env bash
+set -euo pipefail
+IFS=' 	
+'
+
+PROGRAM="skill-set"
+SKILL_SETS="${SKILL_SETS:-$HOME/skill-set}"
+STATE_FILE="${STATE_FILE:-$HOME/.skill-set}"
+TARGET_DIR="${TARGET_DIR:-$HOME}"
+DEFAULT_SET="default"
+TRANSACTION_ACTIVE=0
+CREATED_LINKS=()
+REMOVED_TARGETS=()
+REMOVED_SOURCES=()
+STATE_BACKUP=""
+STATE_WAS_PRESENT=0
+
+error() {
+  echo "$PROGRAM: $*" >&2
+  exit 1
+}
+
+begin_transaction() {
+  TRANSACTION_ACTIVE=1
+  CREATED_LINKS=()
+  REMOVED_TARGETS=()
+  REMOVED_SOURCES=()
+  STATE_BACKUP=""
+  STATE_WAS_PRESENT=0
+  if [ -f "$STATE_FILE" ]; then
+    STATE_BACKUP="$(mktemp "${TMPDIR:-/tmp}/skill-set-state.XXXXXX")" || error "cannot create state backup"
+    cp "$STATE_FILE" "$STATE_BACKUP" || error "cannot back up state file: $STATE_FILE"
+    STATE_WAS_PRESENT=1
+  fi
+}
+
+end_transaction() {
+  TRANSACTION_ACTIVE=0
+  CREATED_LINKS=()
+  REMOVED_TARGETS=()
+  REMOVED_SOURCES=()
+  if [ -n "$STATE_BACKUP" ]; then
+    rm -f "$STATE_BACKUP"
+  fi
+  STATE_BACKUP=""
+  STATE_WAS_PRESENT=0
+}
+
+rollback_mutation() {
+  local i target source
+  if [ "$STATE_WAS_PRESENT" -eq 1 ] && [ -n "$STATE_BACKUP" ]; then
+    mkdir -p "$(dirname "$STATE_FILE")" 2>/dev/null || true
+    cp "$STATE_BACKUP" "$STATE_FILE" 2>/dev/null || true
+  else
+    rm -f "$STATE_FILE" 2>/dev/null || true
+  fi
+
+  i=$((${#CREATED_LINKS[@]} - 1))
+  while [ "$i" -ge 0 ]; do
+    target="${CREATED_LINKS[$i]}"
+    if [ -L "$target" ]; then
+      rm "$target" 2>/dev/null || true
+    fi
+    i=$((i - 1))
+  done
+
+  i=$((${#REMOVED_TARGETS[@]} - 1))
+  while [ "$i" -ge 0 ]; do
+    target="${REMOVED_TARGETS[$i]}"
+    source="${REMOVED_SOURCES[$i]}"
+    if [ ! -e "$target" ] && [ ! -L "$target" ]; then
+      mkdir -p "$(dirname "$target")" 2>/dev/null || true
+      ln -s "$source" "$target" 2>/dev/null || true
+    fi
+    i=$((i - 1))
+  done
+}
+
+transaction_error() {
+  local message
+  message="$*"
+  if [ "$TRANSACTION_ACTIVE" -eq 1 ]; then
+    rollback_mutation
+    end_transaction
+  fi
+  error "$message"
+}
+
+usage() {
+  cat <<'EOF'
+Usage: skill-set <command> [name...]
+       skill-set <set-name> [<set-name>...]
+
+Commands:
+  load <name...>   Replace the active stack with the given sets, in order
+  add <name>       Push a set onto the active stack
+  remove <name>    Remove a set from the active stack
+  unload           Clear the active stack; default remains
+  list             List available switchable sets
+  current          Print the active stack, one set per line, or (none)
+  sync             Ensure default is linked
+  doctor           Show configuration and managed skill targets
+  --help           Show this help
+
+Shorthand:
+  skill-set <name...> is equivalent to skill-set load <name...>
+EOF
+}
+
+ensure_root() {
+  [ -d "$SKILL_SETS" ] || error "skill sets directory not found: $SKILL_SETS"
+}
+
+valid_set_name() {
+  local name
+  name="$1"
+  [ -n "$name" ] || return 1
+  case "$name" in
+    .*|*/*|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  return 0
+}
+
+set_exists() {
+  [ -d "$SKILL_SETS/$1" ]
+}
+
+require_switchable_set() {
+  local name
+  name="$1"
+  valid_set_name "$name" || error "invalid skill set name: $name"
+  [ "$name" != "$DEFAULT_SET" ] || error "reserved skill set name: $DEFAULT_SET"
+  set_exists "$name" || error "no such skill set: $name (try: skill-set list)"
+}
+
+read_stack() {
+  local line
+  [ -f "$STATE_FILE" ] || return 0
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    printf '%s\n' "$line"
+  done < "$STATE_FILE"
+}
+
+validate_stack() {
+  local line
+  [ -f "$STATE_FILE" ] || return 0
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    valid_set_name "$line" || error "invalid state entry: $line"
+    [ "$line" != "$DEFAULT_SET" ] || error "reserved state entry: $DEFAULT_SET"
+    set_exists "$line" || error "state references missing skill set: $line"
+  done < "$STATE_FILE"
+}
+
+stack_contains() {
+  local needle entry
+  needle="$1"
+  validate_stack
+  while IFS= read -r entry; do
+    [ "$entry" = "$needle" ] && return 0
+  done < <(read_stack)
+  return 1
+}
+
+write_stack() {
+  local name tmp_file
+  mkdir -p "$(dirname "$STATE_FILE")" || transaction_error "cannot create state directory"
+  if [ "$#" -eq 0 ]; then
+    rm -f "$STATE_FILE" 2>/dev/null || transaction_error "cannot remove state file: $STATE_FILE"
+    return
+  fi
+  [ ! -d "$STATE_FILE" ] || transaction_error "cannot write state file: $STATE_FILE"
+  tmp_file="$(mktemp "${STATE_FILE}.XXXXXX" 2>/dev/null)" || transaction_error "cannot create temporary state file"
+  for name in "$@"; do
+    printf '%s\n' "$name" >> "$tmp_file" || {
+      rm -f "$tmp_file"
+      transaction_error "cannot write state file: $STATE_FILE"
+    }
+  done
+  mv "$tmp_file" "$STATE_FILE" || {
+    rm -f "$tmp_file"
+    transaction_error "cannot write state file: $STATE_FILE"
+  }
+}
+
+target_dirs() {
+  if [ -n "${SKILL_TARGETS:-}" ]; then
+    printf '%s\n' "$SKILL_TARGETS" | tr ':' '\n'
+    return
+  fi
+
+  printf '%s\n' \
+    "$TARGET_DIR/.agents/skills" \
+    "$TARGET_DIR/.claude/skills" \
+    "$TARGET_DIR/.codex/skills"
+}
+
+skill_paths() {
+  local set_name skill_dir
+  set_name="$1"
+  [ -d "$SKILL_SETS/$set_name" ] || return 0
+  find "$SKILL_SETS/$set_name" -mindepth 1 -maxdepth 1 \( -type d -o -type l \) | while IFS= read -r skill_dir; do
+    [ -d "$skill_dir" ] || continue
+    [ -f "$skill_dir/SKILL.md" ] || continue
+    echo "$skill_dir"
+  done | sort
+}
+
+count_skills_in_set() {
+  skill_paths "$1" | wc -l | tr -d ' '
+}
+
+sync_default() {
+  ensure_root
+  if [ -d "$SKILL_SETS/$DEFAULT_SET" ]; then
+    preflight_link_set "$DEFAULT_SET"
+    begin_transaction
+    link_set "$DEFAULT_SET"
+    end_transaction
+  fi
+}
+
+cmd_list() {
+  local dir name
+  ensure_root
+  find "$SKILL_SETS" -mindepth 1 -maxdepth 1 -type d | while IFS= read -r dir; do
+    name="$(basename "$dir")"
+    [ "$name" = "$DEFAULT_SET" ] && continue
+    valid_set_name "$name" || continue
+    echo "$name"
+  done | sort
+}
+
+cmd_current() {
+  local stack
+  sync_default
+  validate_stack
+  stack="$(read_stack)"
+  if [ -n "$stack" ]; then
+    printf '%s\n' "$stack"
+  else
+    echo "(none)"
+  fi
+}
+
+cmd_sync() {
+  sync_default
+  echo "synced: default"
+}
+
+# Pairwise conflict check across default + every named set.
+# Errors on the first overlapping skill name.
+check_stack_conflicts() {
+  local -a sets
+  sets=()
+  if [ -d "$SKILL_SETS/$DEFAULT_SET" ]; then
+    sets+=("$DEFAULT_SET")
+  fi
+  for s in "$@"; do
+    sets+=("$s")
+  done
+
+  local i j set_a set_b skill_dir skill_name
+  i=0
+  while [ "$i" -lt "${#sets[@]}" ]; do
+    j=$((i + 1))
+    while [ "$j" -lt "${#sets[@]}" ]; do
+      set_a="${sets[$i]}"
+      set_b="${sets[$j]}"
+      while IFS= read -r skill_dir; do
+        skill_name="$(basename "$skill_dir")"
+        if [ -f "$SKILL_SETS/$set_b/$skill_name/SKILL.md" ]; then
+          error "skill exists in both $set_a and $set_b: $skill_name"
+        fi
+      done < <(skill_paths "$set_a")
+      j=$((j + 1))
+    done
+    i=$((i + 1))
+  done
+}
+
+check_input_duplicates() {
+  local seen=" "
+  local name
+  for name in "$@"; do
+    case "$seen" in
+      *" $name "*) error "skill set listed more than once: $name" ;;
+    esac
+    seen="$seen$name "
+  done
+}
+
+target_owned_by_removed_set() {
+  local current_target removable skill_dir
+  current_target="$1"
+  shift
+  for removable in "$@"; do
+    while IFS= read -r skill_dir; do
+      [ "$current_target" = "$skill_dir" ] && return 0
+    done < <(skill_paths "$removable")
+  done
+  return 1
+}
+
+preflight_link_set() {
+  local set_name skill_dir skill_name target_dir target current_target
+  set_name="$1"
+  shift
+  while IFS= read -r skill_dir; do
+    skill_name="$(basename "$skill_dir")"
+    while IFS= read -r target_dir; do
+      [ -n "$target_dir" ] || continue
+      target="$target_dir/$skill_name"
+      if [ -L "$target" ]; then
+        current_target="$(readlink "$target")"
+        [ "$current_target" = "$skill_dir" ] && continue
+        if target_owned_by_removed_set "$current_target" "$@"; then
+          continue
+        fi
+        error "target exists and is not a managed symlink: $target"
+      fi
+      if [ -e "$target" ]; then
+        error "target exists and is not a managed symlink: $target"
+      fi
+    done < <(target_dirs)
+  done < <(skill_paths "$set_name")
+}
+
+preflight_stack_links() {
+  local -a removed
+  local remove_count name
+  remove_count="$1"
+  shift
+  removed=()
+  while [ "$remove_count" -gt 0 ]; do
+    removed+=("$1")
+    shift
+    remove_count=$((remove_count - 1))
+  done
+
+  for name in "$@"; do
+    preflight_link_set "$name" "${removed[@]+"${removed[@]}"}"
+  done
+}
+
+link_set() {
+  local set_name skill_dir skill_name target_dir target current_target
+  set_name="$1"
+  while IFS= read -r skill_dir; do
+    skill_name="$(basename "$skill_dir")"
+    while IFS= read -r target_dir; do
+      [ -n "$target_dir" ] || continue
+      mkdir -p "$target_dir" || transaction_error "cannot create target directory: $target_dir"
+      target="$target_dir/$skill_name"
+      if [ -L "$target" ]; then
+        current_target="$(readlink "$target")"
+        [ "$current_target" = "$skill_dir" ] && continue
+        transaction_error "target exists and is not a managed symlink: $target"
+      fi
+      if [ -e "$target" ]; then
+        transaction_error "target exists and is not a managed symlink: $target"
+      fi
+      ln -s "$skill_dir" "$target" || transaction_error "cannot link $target"
+      if [ "$TRANSACTION_ACTIVE" -eq 1 ]; then
+        CREATED_LINKS+=("$target")
+      fi
+    done < <(target_dirs)
+  done < <(skill_paths "$set_name")
+}
+
+unlink_set() {
+  local set_name skill_dir skill_name target_dir target
+  set_name="$1"
+  while IFS= read -r skill_dir; do
+    skill_name="$(basename "$skill_dir")"
+    while IFS= read -r target_dir; do
+      [ -n "$target_dir" ] || continue
+      target="$target_dir/$skill_name"
+      if [ -L "$target" ] && [ "$(readlink "$target")" = "$skill_dir" ]; then
+        rm "$target" || transaction_error "cannot unlink $target"
+        if [ "$TRANSACTION_ACTIVE" -eq 1 ]; then
+          REMOVED_TARGETS+=("$target")
+          REMOVED_SOURCES+=("$skill_dir")
+        fi
+      fi
+    done < <(target_dirs)
+  done < <(skill_paths "$set_name")
+}
+
+join_with_spaces() {
+  local out=""
+  for x in "$@"; do
+    out="${out}${x} "
+  done
+  printf '%s' "${out% }"
+}
+
+stacks_equal() {
+  local current proposed
+  validate_stack
+  current="$(read_stack)"
+  if [ "$#" -eq 0 ]; then
+    [ -z "$current" ]
+    return
+  fi
+  proposed="$(printf '%s\n' "$@")"
+  [ "$current" = "$proposed" ]
+}
+
+cmd_load() {
+  local name entry
+  if [ "$#" -eq 0 ]; then
+    cmd_unload
+    return
+  fi
+
+  check_input_duplicates "$@"
+  for name in "$@"; do
+    require_switchable_set "$name"
+  done
+  sync_default
+  check_stack_conflicts "$@"
+
+  local -a current_list
+  validate_stack
+  current_list=()
+  while IFS= read -r entry; do
+    current_list+=("$entry")
+  done < <(read_stack)
+  preflight_stack_links "${#current_list[@]}" "${current_list[@]+"${current_list[@]}"}" "$@"
+
+  local current_joined
+  current_joined="$(join_with_spaces "${current_list[@]+"${current_list[@]}"}")"
+
+  if stacks_equal "$@"; then
+    echo "already loaded: $*"
+    return
+  fi
+
+  begin_transaction
+
+  local i
+  i=$((${#current_list[@]} - 1))
+  while [ "$i" -ge 0 ]; do
+    unlink_set "${current_list[$i]}"
+    i=$((i - 1))
+  done
+
+  for name in "$@"; do
+    link_set "$name"
+  done
+
+  write_stack "$@"
+  end_transaction
+
+  if [ -n "$current_joined" ]; then
+    echo "loaded: $* (was: $current_joined)"
+  else
+    echo "loaded: $*"
+  fi
+}
+
+cmd_add() {
+  local name entry
+  [ "$#" -eq 1 ] || error "usage: skill-set add <name>"
+  name="$1"
+  require_switchable_set "$name"
+  sync_default
+
+  if stack_contains "$name"; then
+    echo "already in stack: $name"
+    return
+  fi
+
+  local -a proposed
+  validate_stack
+  proposed=()
+  while IFS= read -r entry; do
+    proposed+=("$entry")
+  done < <(read_stack)
+  proposed+=("$name")
+
+  check_stack_conflicts "${proposed[@]}"
+  preflight_link_set "$name"
+  begin_transaction
+  link_set "$name"
+  write_stack "${proposed[@]}"
+  end_transaction
+  echo "added: $name"
+}
+
+cmd_remove() {
+  local name n
+  [ "$#" -eq 1 ] || error "usage: skill-set remove <name>"
+  name="$1"
+  valid_set_name "$name" || error "invalid skill set name: $name"
+  [ "$name" != "$DEFAULT_SET" ] || error "reserved skill set name: $DEFAULT_SET"
+  sync_default
+
+  if ! stack_contains "$name"; then
+    error "not in stack: $name"
+  fi
+
+  local -a remaining current
+  validate_stack
+  current=()
+  while IFS= read -r n; do
+    current+=("$n")
+  done < <(read_stack)
+  remaining=()
+  for n in "${current[@]+"${current[@]}"}"; do
+    [ "$n" = "$name" ] && continue
+    remaining+=("$n")
+  done
+
+  begin_transaction
+  unlink_set "$name"
+  if [ "${#remaining[@]}" -eq 0 ]; then
+    write_stack
+  else
+    write_stack "${remaining[@]}"
+  fi
+  end_transaction
+  echo "removed: $name"
+}
+
+cmd_unload() {
+  local i entry
+  [ "$#" -eq 0 ] || error "usage: skill-set unload"
+  sync_default
+
+  local -a current_list
+  validate_stack
+  current_list=()
+  while IFS= read -r entry; do
+    current_list+=("$entry")
+  done < <(read_stack)
+
+  if [ "${#current_list[@]}" -eq 0 ]; then
+    echo "unloaded: (none)"
+    return
+  fi
+
+  i=$((${#current_list[@]} - 1))
+  begin_transaction
+  while [ "$i" -ge 0 ]; do
+    unlink_set "${current_list[$i]}"
+    i=$((i - 1))
+  done
+  write_stack
+  end_transaction
+
+  echo "unloaded: $(join_with_spaces "${current_list[@]}")"
+}
+
+print_target_status() {
+  echo "Managed skill targets:"
+  while IFS= read -r target_dir; do
+    [ -n "$target_dir" ] || continue
+    count="0"
+    if [ -d "$target_dir" ]; then
+      count="$(find "$target_dir" -mindepth 1 -maxdepth 1 \( -type f -o -type l -o -type d \) | wc -l | tr -d ' ')"
+    fi
+    printf '  %-35s (%s skills)\n' "$target_dir" "$count"
+  done < <(target_dirs)
+}
+
+cmd_doctor() {
+  sync_default
+  local stack current_display root_status
+  validate_stack
+  stack="$(read_stack)"
+  if [ -n "$stack" ]; then
+    current_display="$(printf '%s' "$stack" | tr '\n' ' ' | sed 's/ $//')"
+  else
+    current_display="(none)"
+  fi
+  if [ -d "$SKILL_SETS" ]; then
+    root_status="ok"
+  else
+    root_status="missing"
+  fi
+
+  printf 'SKILL_SETS  : %s  %s\n' "$SKILL_SETS" "$root_status"
+  printf 'STATE_FILE  : %s\n' "$STATE_FILE"
+  printf 'TARGET_DIR  : %s\n' "$TARGET_DIR"
+  printf 'current     : %s\n' "$current_display"
+  printf 'default     : linked (%s skills)\n' "$(count_skills_in_set "$DEFAULT_SET")"
+  echo
+  print_target_status
+}
+
+main() {
+  command_name="${1:---help}"
+  case "$command_name" in
+    --help|-h|help)
+      usage
+      ;;
+    list)
+      shift; [ "$#" -eq 0 ] || error "usage: skill-set list"
+      ensure_root
+      cmd_list
+      ;;
+    current)
+      shift; [ "$#" -eq 0 ] || error "usage: skill-set current"
+      cmd_current
+      ;;
+    sync)
+      shift; [ "$#" -eq 0 ] || error "usage: skill-set sync"
+      cmd_sync
+      ;;
+    load)
+      shift; cmd_load "$@"
+      ;;
+    add)
+      shift; cmd_add "$@"
+      ;;
+    remove)
+      shift; cmd_remove "$@"
+      ;;
+    unload)
+      shift; cmd_unload "$@"
+      ;;
+    doctor)
+      shift; [ "$#" -eq 0 ] || error "usage: skill-set doctor"
+      cmd_doctor
+      ;;
+    *)
+      cmd_load "$@"
+      ;;
+  esac
+}
+
+main "$@"
