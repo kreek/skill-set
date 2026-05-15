@@ -1,0 +1,27 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install zsh and shellcheck
+        run: sudo apt-get update && sudo apt-get install -y zsh shellcheck
+
+      - name: Install shfmt
+        run: |
+          set -euo pipefail
+          version="v3.8.0"
+          curl -fsSL -o /usr/local/bin/shfmt \
+            "https://github.com/mvdan/sh/releases/download/${version}/shfmt_${version}_linux_amd64"
+          chmod +x /usr/local/bin/shfmt
+          shfmt --version
+
+      - name: make check
+        run: make check
