@@ -1,9 +1,9 @@
 class SkillSet < Formula
   desc "Switch filesystem skill sets across AI coding agents"
-  homepage "https://github.com/alastair/skill-set"
-  url "https://github.com/alastair/skill-set.git", tag: "v0.1.0"
+  homepage "https://github.com/kreek/skill-set"
+  url "https://github.com/kreek/skill-set.git", tag: "v0.1.0"
   license "MIT"
-  head "https://github.com/alastair/skill-set.git", branch: "main"
+  head "https://github.com/kreek/skill-set.git", branch: "main"
 
 
   def install

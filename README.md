@@ -62,12 +62,17 @@ Override targets with a colon-separated `SKILL_TARGETS` value.
 
 ## Install
 
-### Direct script
+### Homebrew (preferred)
+
+Tap this repository explicitly, then install the formula:
 
 ```sh
-install -m 0755 bin/skill-set /usr/local/bin/skill-set
-ln -sf skill-set /usr/local/bin/sklset
+brew tap kreek/skill-set https://github.com/kreek/skill-set
+brew install --HEAD skill-set
 ```
+
+Homebrew installs `skill-set`, the `sklset` alias, and Bash and Zsh completion
+files.
 
 ### From this repo
 
@@ -94,13 +99,13 @@ fpath=("$HOME/.local/share/zsh/site-functions" $fpath)
 autoload -Uz compinit && compinit
 ```
 
-### Homebrew tap
+### Direct script
 
-A formula is included at `Formula/skill-set.rb`. Publish this repository to the tap URL used in that formula, then install with:
+Use this only when you do not want Homebrew or the repository installer:
 
 ```sh
-brew tap <user>/<tap>
-brew install skill-set
+install -m 0755 bin/skill-set /usr/local/bin/skill-set
+ln -sf skill-set /usr/local/bin/sklset
 ```
 
 ## Usage
