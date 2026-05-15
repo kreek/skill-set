@@ -2,10 +2,9 @@
 
 `skill-set` is a local skill management system for AI coding agents.
 
-It organizes filesystem skills into named bundles, then switches which bundles
-are symlinked into each agent's skills directory. Use it to keep a stable
-baseline loaded while swapping task-specific skill sets without manually moving
-directories.
+It organizes filesystem skills into composable named bundles. Keep shared
+skills in `default` as a stable baseline, then layer task-specific sets on top
+by switching which bundles are symlinked into each agent's skills directory.
 
 Install skills the same way you would for `.agents` or `.claude`, but put them
 under `~/skill-set` instead. To keep the source directory somewhere else, set
