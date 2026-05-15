@@ -41,7 +41,10 @@ stack.
     domain-modeling/SKILL.md
 ```
 
-Each skill is a directory with a `SKILL.md` file. Skill directories may also be
+Each skill is a directory with a `SKILL.md` file. The file marks the directory
+as a skill — its contents are not parsed by `skill-set`, so any format the
+agent understands works. Subdirectories without a `SKILL.md` are ignored, which
+leaves room for per-set notes or fixtures. Skill directories may also be
 symlinks to skill directories stored elsewhere.
 
 Hidden directories, invalid set names, and `default` are excluded from
@@ -126,6 +129,27 @@ skill-set doctor              # show config and managed target counts
 no-op. Passing no names to `skill-set load` is the same as `skill-set unload`.
 `skill-set add` reports a no-op when the set is already active. `skill-set
 remove` fails when the set is not active.
+
+`skill-set doctor` shows how the layers resolve. After
+`skill-set load dev ruby`, the output looks like:
+
+```text
+SKILL_SETS  : /Users/you/skill-set  ok
+STATE_FILE  : /Users/you/.skill-set
+TARGET_DIR  : /Users/you
+current     : dev ruby
+default     : present (2 skills)
+
+Managed skill targets:
+  /Users/you/.agents/skills             (7 skills)
+  /Users/you/.claude/skills             (7 skills)
+  /Users/you/.codex/skills              (7 skills)
+```
+
+Here `default` contributes 2 skills, `dev` and `ruby` together contribute 5
+more, and each target directory ends up with the same 7 symlinks. Skill names
+must be unique across `default` and the active stack, so the target counts
+always match the sum of the source sets.
 
 Source skill sets are read from `~/skill-set` by default, and state is stored in
 `~/.skill-set`. Override paths for tests or unusual layouts:
