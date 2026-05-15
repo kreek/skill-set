@@ -1,11 +1,11 @@
 # skill-set
 
-`skill-set` switches filesystem skills across AI coding agents with one Bash
-script.
+`skill-set` is a local skill management system for AI coding agents.
 
-It organizes skills into named bundles and switches which bundles are symlinked
-into each agent's skills directory. Use it to compose a stable baseline with
-task-specific skill sets without manually moving directories.
+It organizes filesystem skills into named bundles, then switches which bundles
+are symlinked into each agent's skills directory. Use it to keep a stable
+baseline loaded while swapping task-specific skill sets without manually moving
+directories.
 
 Install skills the same way you would for `.agents` or `.claude`, but put them
 under `~/skill-set` instead. To keep the source directory somewhere else, set
