@@ -17,7 +17,9 @@ assert_eq() {
   name="$1" expected="$2" actual="$3"
   [ "$expected" = "$actual" ] || fail "$name" "expected: [$expected]\nactual:   [$actual]"
 }
-assert_file_absent() { [ ! -e "$1" ] && [ ! -L "$1" ] || fail "$2" "expected absent: $1"; }
+assert_file_absent() {
+  if [ -e "$1" ] || [ -L "$1" ]; then fail "$2" "expected absent: $1"; fi
+}
 assert_file_present() { [ -e "$1" ] || fail "$2" "expected present: $1"; }
 assert_link_target() {
   target="$1" expected="$2" name="$3"
@@ -261,6 +263,7 @@ assert_file_absent "$TARGET_DIR/.agents/skills/sre-playbook" "sync without defau
 pass "sync reports when no default set exists"
 
 setup_case
+ln -s "$BIN" "$TMP_ROOT/bin/skill-set"
 make_skill default pi-craft
 make_skill dev workflow
 make_skill product-management specify
